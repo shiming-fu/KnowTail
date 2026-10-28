@@ -1,0 +1,322 @@
+import json
+import os
+import re
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
+from utils import add_long_tail_label, get_label_mapping, add_long_tail_and_sim_label
+
+# 评估长尾知识的召回率
+
+def eval_zero_shot(test_file_path):
+    count=0
+    count_recall = 0
+    count_acc = 0
+    with open(test_file_path, "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            case = json.loads(line)
+            ground_truth = case.get("charge")
+            exact_match_answer = case["exact_match_answer"]
+            exact_and_fuzzy_match_answer = case["exact_and_fuzzy_match_answer"][:1]
+            if len(exact_match_answer)==1 and exact_match_answer[0] == ground_truth:
+                count_acc+=1
+                count_recall+=1
+            else:
+                all_ans = []
+                if len(exact_match_answer)>1:
+                    all_ans = exact_match_answer
+                else:
+                    all_ans = exact_and_fuzzy_match_answer
+                for answer in all_ans:
+                    if answer == ground_truth:
+                        count_recall+=1
+                        break
+            count+=1
+    print(f"Recall:{count_recall/count} | Accuracy: {count_acc/count}")
+
+def eval_zero_shot_with_long_tail_label(knowledge_path, test_file_path, label_num):
+    count=0
+    count_recall = 0
+    pl2tl, _ = get_label_mapping(knowledge_path)
+    with open(test_file_path, "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            case = json.loads(line)
+            ground_truth = case.get("charge")
+            if len(case["exact_match_answer"])!=0:
+                label = []
+                label.extend(case["exact_match_answer"])
+                label.extend(case["exact_and_fuzzy_match_answer"][:1])
+                answers = add_long_tail_label(label, pl2tl, label_num=label_num)
+            else:
+                answers = add_long_tail_label(case["exact_and_fuzzy_match_answer"][:2], pl2tl, label_num=label_num)
+            if ground_truth in answers:
+                count_recall+=1
+            count+=1
+    print(f"Recall:{count_recall/count}")
+
+def eval_zero_shot_with_long_tail_and_sim_label(knowledge_path, test_file_path, label_num):
+    count=0
+    count_recall = 0
+    pl2tl, tl2pl = get_label_mapping(knowledge_path)
+    with open("/home/kai/workspace/longtail/knowledge/similar_crimes.json","r", encoding="utf-8") as fi:
+        sim_crimes = json.load(fi)
+    with open(test_file_path, "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            case = json.loads(line)
+            ground_truth = case.get("charge")
+            if len(case["exact_match_answer"])!=0:
+                label = []
+                label.extend(case["exact_match_answer"])
+                label.extend(case["exact_and_fuzzy_match_answer"][:1])
+                answers = add_long_tail_and_sim_label(label, pl2tl, sim_crimes, label_num=label_num)
+            else:
+                answers = add_long_tail_and_sim_label(case["exact_and_fuzzy_match_answer"][:2], pl2tl, sim_crimes, label_num=label_num)
+            if ground_truth in answers:
+                count_recall+=1
+            count+=1
+    print(f"Recall:{count_recall/count}")    
+    
+def conduct_eval_1():
+    model_name = "baichuan2-13b"
+    knowledge_path = f"/home/kai/workspace/longtail/knowledge/trainset_{model_name}_zero_shot.json"
+    test_file_path = f"/home/kai/workspace/longtail/outputs/{model_name}/testset_zero_shot.json"
+    eval_zero_shot(test_file_path=test_file_path)
+    eval_zero_shot_with_long_tail_label(knowledge_path=knowledge_path, 
+                                        test_file_path=test_file_path, 
+                                        label_num=5)
+    eval_zero_shot_with_long_tail_and_sim_label(knowledge_path=knowledge_path, 
+                                        test_file_path=test_file_path, 
+                                        label_num=5)
+
+
+# 评估baseline和ours methods
+
+with open("dataset/cail/charge_labels.txt", "r", encoding="utf-8") as fi:
+    charge_labels = json.load(fi)
+head_labels = charge_labels[-15:]
+tail_labels = charge_labels[:-15]
+base_path = f"outputs"
+responsekey = {
+    "zero_shot":"response",
+    "zero_shot_cot":"zero_cot_response",
+    "few_shot_cot":"few_cot_response",
+    "options_random":"options_random_response",
+    "options":"lt_options_response",
+    "options_case":"lt_options_case_response", 
+    "options_desc":"lt_options_desc_response",
+    "options_desc_case":"lt_options_desc_case_response",
+    "rag":"rag_response"
+}
+
+def get_perded_labels_wo_options(response, true_label):
+    pred = [0]*len(charge_labels)
+    truth = [0]*len(charge_labels)
+    truth[charge_labels.index(true_label)]=1
+    pred_labels = []
+    sorted_charge_labels = sorted(charge_labels, key=lambda x:len(x), reverse=True)
+    for c in sorted_charge_labels:
+        if c in response:
+            pred_labels.append(c)
+            response = re.sub(c, "", response)
+    for p in pred_labels:
+        pred[charge_labels.index(p)]=1
+    return pred, truth
+
+def print_scores(model_name, 
+                 method, 
+                 file_name,  
+                 preds,  
+                 truths):
+    # All
+    acc_all = round(accuracy_score(y_pred=preds[0], y_true=truths[0])*100,2)
+    prec_all = round(precision_score(y_pred=preds[0], y_true=truths[0], average='samples')*100,2)
+    rec_all = round(recall_score(y_pred=preds[0], y_true=truths[0], average='samples')*100,2)
+    f1_all = round(f1_score(y_pred=preds[0], y_true=truths[0], average='samples')*100,2)
+    # Head
+    acc_head = round(accuracy_score(y_pred=preds[1], y_true=truths[1])*100,2)
+    prec_head = round(precision_score(y_pred=preds[1], y_true=truths[1], average='samples')*100,2)
+    rec_head = round(recall_score(y_pred=preds[1], y_true=truths[1], average='samples')*100,2)
+    f1_head = round(f1_score(y_pred=preds[1], y_true=truths[1], average='samples')*100,2)
+    # Tail
+    acc_tail = round(accuracy_score(y_pred=preds[2], y_true=truths[2])*100,2)
+    prec_tail = round(precision_score(y_pred=preds[2], y_true=truths[2], average='samples')*100,2)
+    rec_tail = round(recall_score(y_pred=preds[2], y_true=truths[2], average='samples')*100,2)
+    f1_tail = round(f1_score(y_pred=preds[2], y_true=truths[2], average='samples')*100,2)
+    print(f"\n=====> [{model_name} | {method} | {file_name}] <=====\n")
+    print(f"[Head] Acc: {acc_head} | Prec: {prec_head} | Rec: {rec_head} | F1: {f1_head}")
+    print(f"[Tail] Acc: {acc_tail} | Prec: {prec_tail} | Rec: {rec_tail} | F1: {f1_tail}")
+    print(f"[ALL ] Acc: {acc_all} | Prec: {prec_all} | Rec: {rec_all} | F1: {f1_all}")
+    print(",".join([str(acc_head), str(prec_head),str(rec_head),str(f1_head),str(acc_tail), str(prec_tail),str(rec_tail),str(f1_tail),str(acc_all), str(prec_all), str(rec_all), str(f1_all)]))
+    # print(",".join([])+"")
+    # print(",".join([])+"")
+    
+def eval_cot_rag(model_name, method):
+    # zero/few/rag shot CoT
+    assert model_name in ["qwen2-0.5b", "qwen2-1.5b", "qwen2-7b", "baichuan2-13b", "gpt-4o-mini", "gpt-4o-2024-08-06"], "模型名称错误"   
+    assert method in ["zero_shot", "zero_shot_cot", "few_shot_cot","rag"], "method 参数错误"
+    path_ = os.path.join(base_path, model_name, method)
+    for file_name in os.listdir(path_):
+        preds_all, ground_truths_all = [], []
+        preds_head, ground_truths_head = [], []
+        preds_tail, ground_truths_tail = [], []
+        input_path = os.path.join(path_, file_name)
+        with open(input_path, "r", encoding="utf-8") as fi:
+            for line in fi.readlines():
+                case = json.loads(line)
+                response = case[responsekey[method]]
+                pred, truth = get_perded_labels_wo_options(response,case["charge"])
+                preds_all.append(pred)
+                ground_truths_all.append(truth)
+                if case["charge"] in head_labels:
+                    preds_head.append(pred)
+                    ground_truths_head.append(truth)
+                elif case["charge"] in tail_labels:
+                    preds_tail.append(pred)
+                    ground_truths_tail.append(truth)
+        preds = [preds_all, preds_head, preds_tail]
+        ground_truths = [ground_truths_all, ground_truths_head, ground_truths_tail]
+        print_scores(model_name, method, file_name, preds, ground_truths)
+
+def get_perded_labels_w_options(response, charge, options):
+    index2charge = dict([tuple(item.split(".")) for item in options])
+    sorted_charge_labels = sorted(charge_labels, key=lambda x:len(x), reverse=True)
+    pred = [0]*len(charge_labels)
+    truth = [0]*len(charge_labels)
+    truth[charge_labels.index(charge)]=1
+    # get predicted charges or indexs
+    pred_labels = []
+    pred_indexs = []
+    for c in sorted_charge_labels:
+        if c in response:
+            pred_labels.append(c)
+            response = re.sub(c, "", response)
+    for i in ["A", "B", "C", "D", "E", "F", "G"]:
+        if i in response:
+            pred_indexs.append(i)
+    # get predictions
+    for pi in pred_indexs:
+        if pi in index2charge:
+            pred[charge_labels.index(index2charge[pi][:-1])]=1
+    for pl in pred_labels:
+        pred[charge_labels.index(pl)]=1
+    
+    return pred, truth
+
+def eval_option(model_name, method):
+    assert model_name in ["qwen2-0.5b", "qwen2-1.5b", "qwen2-7b", "baichuan2-13b", "gpt-4o-mini", "gpt-4o-2024-08-06"], "模型名称错误"   
+    assert method in ["options", "options_random", "options_case", "options_desc", "options_desc_case"], f"{method} 参数错误"
+    path_ = os.path.join(base_path, model_name, method)
+    for file_name in os.listdir(path_):
+        preds_all, ground_truths_all = [], []
+        preds_head, ground_truths_head = [], []
+        preds_tail, ground_truths_tail = [], []
+        input_path = os.path.join(path_, file_name)
+        with open(input_path, "r", encoding="utf-8") as fi:
+            for line in fi.readlines():
+                case = json.loads(line)
+                response = case[responsekey[method]]
+                pred, truth = get_perded_labels_w_options(response,case["charge"], options=case["options"])
+                preds_all.append(pred)
+                ground_truths_all.append(truth)
+                if case["charge"] in head_labels:
+                    preds_head.append(pred)
+                    ground_truths_head.append(truth)
+                elif case["charge"] in tail_labels:
+                    preds_tail.append(pred)
+                    ground_truths_tail.append(truth)
+        preds = [preds_all, preds_head, preds_tail]
+        ground_truths = [ground_truths_all, ground_truths_head, ground_truths_tail]                
+        print_scores(model_name, method, file_name, preds, ground_truths)
+                            
+def conduct_eval_2():
+    # for mn in ["gpt-4o-2024-08-06"]: #  "qwen2-0.5b", "qwen2-1.5b", "qwen2-7b","baichuan2-13b",
+    #     eval_cot_rag(mn, "few_shot_cot")
+    model_names = ["baichuan2-13b"] # , "qwen2-7b", "baichuan2-13b"
+    # model_names = ["gpt-4o-2024-08-06"] # ,"gpt-4o-2024-08-06"
+    for mn in model_names: #
+        eval_option(mn, "options_random")
+
+def select_cases_for_case_study():
+    model = "GPT-4o-2024-08-06"
+    head_labels = charge_labels[-37:]
+    tail_labels = charge_labels[:150]
+    rks = ["rag_response", "few_cot_response", "zero_cot_response"]
+    baselines = [f"outputs/{model}/rag/testset_rag_1.json",
+                 f"outputs/{model}/few_shot_cot/testset_1_shot_cot.json",
+                 f"outputs/{model}/zero_shot_cot/testset_zero_shot_cot.json"]
+    ours = f"outputs/{model}/options_desc/testset_4_options_desc.json"
+    ours_data, rag_data, few_cot_data, zero_cot_data = [], [], [], []
+    with open(ours, "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            ours_data.append(json.loads(line))
+    with open(baselines[0], "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            rag_data.append(json.loads(line))
+    with open(baselines[1], "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            few_cot_data.append(json.loads(line))
+    with open(baselines[2], "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            zero_cot_data.append(json.loads(line))
+    for zero_case, few_case, rag_case, our_case in zip(zero_cot_data, few_cot_data, rag_data, ours_data):
+        our_pred, our_truth = get_perded_labels_w_options(our_case["lt_options_desc_response"],
+                                                  our_case["charge"], 
+                                                  options=our_case["options"])
+        rag_pred, rag_truth = get_perded_labels_wo_options(rag_case[rks[0]],
+                                                   rag_case["charge"])
+        few_pred, few_truth = get_perded_labels_wo_options(few_case[rks[1]],
+                                                   few_case["charge"])
+        zero_pred, zero_truth = get_perded_labels_wo_options(zero_case[rks[2]],
+                                                   zero_case["charge"])
+        if our_pred == our_truth and rag_pred[rag_truth.index(1)]!=1 and few_pred[few_truth.index(1)]!=1 and zero_pred[zero_truth.index(1)]!=1:
+            if charge_labels[our_pred.index(1)] in tail_labels:
+                # print("id   |   zero-cot   |   few-cot   |   rag   |   our")
+                print(f"{our_case['id']} * {[charge_labels[i] for i,v in enumerate(zero_pred) if v==1]} * {[charge_labels[i] for i,v in enumerate(few_pred) if v==1]} * {[charge_labels[i] for i,v in enumerate(rag_pred) if v==1]} <- {[charge_labels[i] for i,v in enumerate(our_pred) if v==1]}")
+    
+def select_cases_for_rag_analysis():
+    head_labels = charge_labels[-37:]
+    tail_labels = charge_labels[:150]
+    baselines = "outputs/QWen2-1.5B/rag/testset_rag_4.json"
+    sim_cases_path = "dataset/cail/testset_large_with_bm25_sim_cases.json"
+    rag_data, sim_cases = [], {}
+    with open(sim_cases_path, "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            case=json.loads(line)
+            sim_cases[case['id']]=case
+    with open(baselines, "r", encoding="utf-8") as fi:
+        for line in fi.readlines():
+            rag_data.append(json.loads(line))
+    retrieved_case_count = 0
+    err_pred_tail_cases, err_pred_fi = [], open("dataset/cail/rag_err_pred_file.json","w", encoding="utf-8")
+    head_label_cases, head_label_case_fi = [],open("dataset/cail/rag_head_label_case_file.json","w", encoding="utf-8")
+    sim_label_cases, sim_label_case_fi= [],open("dataset/cail/rag_sim_label_case_file.json","w", encoding="utf-8")
+    for rag_case in rag_data:
+        rag_pred, rag_truth = get_perded_labels_wo_options(rag_case["rag_response"],
+                                                           rag_case["charge"])
+        # rag错误预测的case and ground_truth in tail
+        if rag_pred[rag_truth.index(1)]!=1 and rag_truth.index(1)<150:
+            err_pred_tail_cases.append(rag_case['id'])
+            for cail_case in sim_cases[rag_case['id']]["similar_cases"][0:5]:
+                retrieved_case_count+=1
+                retrieved_charge = re.sub(r"[\[\]]","",cail_case["meta"]["accusation"][0])
+                for hl in head_labels:
+                    if hl == retrieved_charge:
+                        head_label_cases.append(rag_case['id'])
+                    if hl in retrieved_charge:
+                        sim_label_cases.append(rag_case['id'])
+    print(f"错误预测的Tail案件：{len(err_pred_tail_cases)}")
+    print(f"检索到的相似干扰案件：{len(sim_label_cases)}/{retrieved_case_count}={len(sim_label_cases)/retrieved_case_count}")
+    print(f"检索到的Head案件：{len(head_label_cases)}/{retrieved_case_count}={len(head_label_cases)/retrieved_case_count}")
+    for idx in err_pred_tail_cases:
+        err_pred_fi.write(json.dumps(sim_cases[idx], ensure_ascii=False)+"\n")
+    for idx in head_label_cases:
+        head_label_case_fi.write(json.dumps(sim_cases[idx], ensure_ascii=False)+"\n")
+    for idx in sim_label_cases:
+        sim_label_case_fi.write(json.dumps(sim_cases[idx], ensure_ascii=False)+"\n")
+    err_pred_fi.close()
+    head_label_case_fi.close()
+    sim_label_case_fi.close()
+               
+        
+
+if __name__=="__main__":
+    select_cases_for_case_study()
+    
